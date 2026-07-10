@@ -22,9 +22,6 @@ import {
 import { translateWithGoogle } from "./lib/services/googleTranslate";
 import { createStandardResponse } from "./lib/types";
 
-/**
- * Initialize Hono app with environment bindings
- */
 const app = new Hono<{ Bindings: Env }>();
 
 function isDebugModeEnabled(value?: string): boolean {
@@ -32,20 +29,10 @@ function isDebugModeEnabled(value?: string): boolean {
   return ["true", "1", "yes", "on"].includes(value.trim().toLowerCase());
 }
 
-/**
- * 内存日志存储（最多 200 条）
- */
 const recentLogs: any[] = [];
 const MAX_LOGS = 200;
 
-/**
- * Scheduled event handler
- */
-function scheduled(
-  event: ScheduledEvent,
-  env: Env,
-  ctx: ExecutionContext
-): void {
+function scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): void {
   ctx.waitUntil(handleScheduled(event, env));
 }
 
@@ -53,16 +40,9 @@ async function handleScheduled(event: ScheduledEvent, env: Env): Promise<void> {
   clearMemoryCache();
 }
 
-const worker = {
-  fetch: app.fetch,
-  scheduled,
-};
-
+const worker = { fetch: app.fetch, scheduled };
 export default worker;
 
-/**
- * 统一的日志函数
- */
 async function logRequest(
   env: Env,
   context: {
@@ -111,14 +91,11 @@ async function logRequest(
         body: JSON.stringify(logEntry),
       });
     } catch {
-      // 忽略
+      // ignore
     }
   }
 }
 
-/**
- * 公共翻译处理函数
- */
 async function handleTranslation(c: any, provider: "deepl" | "google") {
   const env = c.env;
   const clientIP = getSecureClientIP(c.req.raw) || "unknown";
@@ -222,36 +199,35 @@ async function handleTranslation(c: any, provider: "deepl" | "google") {
   }
 }
 
-/**
- * Sharkey 专用翻译处理函数 - 带原始请求体打印
- */
+// ============================================================
+// Sharkey 专用处理函数（已修复）
+// ============================================================
 async function handleSharkeyTranslation(c: any) {
-  // ============================================================
-  // 调试：打印原始请求体（部署后运行 npx wrangler tail 查看）
-  // ============================================================
-  const rawBody = await c.req.text();
-  console.log("=== RAW REQUEST BODY ===");
-  console.log(rawBody);
-  console.log("=== RAW HEADERS ===");
-  const headers: Record<string, string> = {};
-  for (const [key, value] of c.req.raw.headers.entries()) {
-    headers[key] = value;
-  }
-  console.log(JSON.stringify(headers, null, 2));
-  console.log("=== END RAW REQUEST ===");
-
   const startTime = Date.now();
   const env = c.env;
   const clientIP = getSecureClientIP(c.req.raw) || "unknown";
 
-  let sourceLang = "unknown";
-  let targetLang = "unknown";
+  // 用于日志记录
+  let requestSourceLang = "unknown";
+  let requestTargetLang = "unknown";
   let status = 500;
   let errorMsg: string | undefined;
   let requestText = "";
 
   try {
-    // 解析请求参数（支持 JSON 和 URL-encoded）
+    // 打印原始请求体（调试用）
+    const rawBody = await c.req.text();
+    console.log("=== RAW REQUEST BODY ===");
+    console.log(rawBody);
+    console.log("=== RAW HEADERS ===");
+    const headers: Record<string, string> = {};
+    for (const [key, value] of c.req.raw.headers.entries()) {
+      headers[key] = value;
+    }
+    console.log(JSON.stringify(headers, null, 2));
+    console.log("=== END RAW REQUEST ===");
+
+    // 解析请求参数
     let params: any = {};
     const contentType = c.req.header("Content-Type") || "";
     if (contentType.includes("application/x-www-form-urlencoded")) {
@@ -274,6 +250,7 @@ async function handleSharkeyTranslation(c: any) {
       }
     }
 
+    // 提取文本
     const text = params.text;
     if (!text || typeof text !== "string" || !text.trim()) {
       status = 400;
@@ -295,8 +272,11 @@ async function handleSharkeyTranslation(c: any) {
     const sanitizedText = text.slice(0, PAYLOAD_LIMITS.MAX_TEXT_LENGTH);
     requestText = sanitizedText;
 
+    // 处理语言代码：保留 "auto"，其他转为大写并去掉区域后缀
     const normalizeLangCode = (code: string): string => {
-      if (!code || code.toLowerCase() === "auto") return code;
+      if (!code) return "auto";
+      const lower = code.toLowerCase();
+      if (lower === "auto") return "auto"; // 保持小写
       const parts = code.split("-");
       return parts[0].toUpperCase();
     };
@@ -306,17 +286,19 @@ async function handleSharkeyTranslation(c: any) {
     const normalizedSource = normalizeLangCode(rawSource);
     const normalizedTarget = normalizeLangCode(rawTarget);
 
-    const validSource = validateLanguageCode(normalizedSource);
-    const validTarget = validateLanguageCode(normalizedTarget);
+    // 验证语言代码
+    // validateLanguageCode 可能不接受 "auto"，所以先判断
+    const validSource = normalizedSource === "auto" ? "auto" : validateLanguageCode(normalizedSource);
+    const validTarget = normalizedTarget === "auto" ? "auto" : validateLanguageCode(normalizedTarget);
     if (!validSource || !validTarget) {
       status = 400;
-      errorMsg = "Invalid language codes";
+      errorMsg = `Invalid language codes: source=${validSource}, target=${validTarget}`;
       await logRequest(env, {
         method: "POST",
         path: "/deepl-sharkey",
         ip: clientIP,
-        sourceLang: normalizedSource || "auto",
-        targetLang: normalizedTarget || "en",
+        sourceLang: validSource || "auto",
+        targetLang: validTarget || "en",
         status,
         responseTime: Date.now() - startTime,
         error: errorMsg,
@@ -325,12 +307,15 @@ async function handleSharkeyTranslation(c: any) {
       return c.json({ error: errorMsg }, 400);
     }
 
-    const normalizedSourceLang = normalizeLanguageCode(validSource);
-    const normalizedTargetLang = normalizeLanguageCode(validTarget);
+    // 归一化（用于内部翻译）
+    // 注意：normalizeLanguageCode 对 "auto" 可能返回 "auto"，也可能返回 "AUTO"，需要兼容
+    const normalizedSourceLang = normalizedSource === "auto" ? "auto" : normalizeLanguageCode(validSource);
+    const normalizedTargetLang = normalizedTarget === "auto" ? "auto" : normalizeLanguageCode(validTarget);
 
-    sourceLang = normalizedSourceLang;
-    targetLang = normalizedTargetLang;
+    requestSourceLang = normalizedSourceLang;
+    requestTargetLang = normalizedTargetLang;
 
+    // 缓存键
     const cacheKey = generateCacheKey(
       sanitizedText,
       normalizedSourceLang,
@@ -363,6 +348,7 @@ async function handleSharkeyTranslation(c: any) {
       );
     }
 
+    // 调用翻译核心
     const result = await query(
       {
         text: sanitizedText,
@@ -427,14 +413,18 @@ async function handleSharkeyTranslation(c: any) {
     }
   } catch (error) {
     const elapsed = Date.now() - startTime;
-    errorMsg = error instanceof Error ? error.message : String(error);
+    const err = error as Error;
+    errorMsg = err.message || String(error);
+    console.error("=== EXCEPTION IN HANDLER ===");
+    console.error(err.stack);
+    console.error("=== END EXCEPTION ===");
     status = 500;
     await logRequest(env, {
       method: "POST",
       path: "/deepl-sharkey",
       ip: clientIP,
-      sourceLang: sourceLang || "unknown",
-      targetLang: targetLang || "unknown",
+      sourceLang: requestSourceLang || "unknown",
+      targetLang: requestTargetLang || "unknown",
       status,
       responseTime: elapsed,
       error: errorMsg,
@@ -444,9 +434,9 @@ async function handleSharkeyTranslation(c: any) {
   }
 }
 
-/**
- * API Route Definitions
- */
+// ============================================================
+// 路由定义
+// ============================================================
 app
   .options("*", (c) => handleCORSPreflight(c))
 
@@ -528,21 +518,10 @@ app
     }
   })
 
-  .post("/translate", async (c) => {
-    return handleTranslation(c, "deepl");
-  })
-
-  .post("/deepl", async (c) => {
-    return handleTranslation(c, "deepl");
-  })
-
-  .post("/google", async (c) => {
-    return handleTranslation(c, "google");
-  })
-
-  .post("/deepl-sharkey", async (c) => {
-    return handleSharkeyTranslation(c);
-  })
+  .post("/translate", async (c) => handleTranslation(c, "deepl"))
+  .post("/deepl", async (c) => handleTranslation(c, "deepl"))
+  .post("/google", async (c) => handleTranslation(c, "google"))
+  .post("/deepl-sharkey", async (c) => handleSharkeyTranslation(c))
 
   .get("/log", (c) => {
     return c.json({
