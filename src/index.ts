@@ -344,6 +344,72 @@ app
   })
 
   /**
+   * Sharkey 专用翻译端点
+   * 返回 DeepL 官方 API 兼容格式，供 Sharkey 使用
+   * POST /deepl-sharkey
+   */
+  .post("/deepl-sharkey", async (c) => {
+    const env = c.env;
+    const clientIP = getSecureClientIP(c.req.raw) || "unknown";
+
+    try {
+      // 解析请求参数
+      let params;
+      try {
+        params = await c.req.json();
+      } catch {
+        return c.json({ error: "Invalid JSON" }, 400);
+      }
+
+      // 参数验证（与 handleTranslation 保持一致）
+      if (!params?.text || typeof params.text !== "string" || !params.text.trim()) {
+        return c.json({ error: "Missing or invalid text" }, 400);
+      }
+
+      const sanitizedText = params.text.slice(0, PAYLOAD_LIMITS.MAX_TEXT_LENGTH);
+      const sourceLang = params.source_lang ? validateLanguageCode(params.source_lang) : "auto";
+      const targetLang = params.target_lang ? validateLanguageCode(params.target_lang) : "en";
+
+      if (!sourceLang || !targetLang) {
+        return c.json({ error: "Invalid language codes" }, 400);
+      }
+
+      // 归一化语言代码（与 handleTranslation 一致）
+      const normalizedSourceLang = normalizeLanguageCode(sourceLang);
+      const normalizedTargetLang = normalizeLanguageCode(targetLang);
+
+      // 调用 DeepL 翻译核心（复用现有 query）
+      const result = await query(
+        {
+          text: sanitizedText,
+          source_lang: normalizedSourceLang,
+          target_lang: normalizedTargetLang,
+        },
+        { env, clientIP }
+      );
+
+      // 如果翻译成功，转换为 Sharkey 期望的 DeepL 格式
+      if (result.code === 200 && result.data) {
+        return c.json(
+          {
+            translations: [{ text: result.data }],
+          },
+          200
+        );
+      } else {
+        // 翻译失败时返回错误信息
+        return c.json(
+          { error: result.data || "Translation failed" },
+          result.code || 500
+        );
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      return c.json({ error: errorMessage }, 500);
+    }
+  })
+
+  /**
    * Catch-all route for undefined paths
    * Redirects all other requests to the GitHub repository
    */
