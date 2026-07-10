@@ -1,26 +1,32 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "account_id": "c738634d50252737caf9fb723043a869",
-  "analytics_engine_datasets": [
-    {
-      "binding": "ANALYTICS"
-    }
-  ],
   "compatibility_date": "2025-07-19",
+  "name": "deeplx",
+  "main": "src/index.ts",
+  "workers_dev": false,
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
+  "placement": {
+    "mode": "smart"
+  },
+  "vars": {
+    "DEBUG_MODE": "false",
+    "PROXY_URLS": "https://0.xdpl.xixu.dpdns.org/jsonrpc,https://1.xdpl.xixu.dpdns.org/jsonrpc,https://2.xdpl.xixu.dpdns.org/jsonrpc,https://3.xdpl.xixu.dpdns.org/jsonrpc,https://4.xdpl.xixu.dpdns.org/jsonrpc,https://5.xdpl.xixu.dpdns.org/jsonrpc,https://6.xdpl.xixu.dpdns.org/jsonrpc,https://7.xdpl.xixu.dpdns.org/jsonrpc,https://8.xdpl.xixu.dpdns.org/jsonrpc,https://9.xdpl.xixu.dpdns.org/jsonrpc"
+  },
   "kv_namespaces": [
     {
       "binding": "CACHE_KV",
-      "id": "4d5895d8716247f486493b93edbc5fe9",
+      "id": "cb28dfebebd64fd490725c3e8be0ed6d",
       "preview_id": "e9e499fe006e4879a0668e792fe2dd15"
     },
     {
       "binding": "RATE_LIMIT_KV",
-      "id": "07147ca64a4c48fe952f62afe469bb44",
+      "id": "52d62a0bfe764658965509592159aff2",
       "preview_id": "bbed039364e5488e8ed58701c3ee5da5"
     }
   ],
-  "main": "src/index.ts",
-  "name": "deeplx",
   "observability": {
     "enabled": false,
     "head_sampling_rate": 1,
@@ -35,16 +41,5 @@
       "head_sampling_rate": 1,
       "persist": true
     }
-  },
-  "placement": {
-    "mode": "smart"
-  },
-  "triggers": {
-    "crons": ["*/5 * * * *"]
-  },
-  "vars": {
-    "DEBUG_MODE": "false",
-    "PROXY_URLS": "https://0.xdpl.xixu.dpdns.org/jsonrpc,https://1.xdpl.xixu.dpdns.org/jsonrpc,https://2.xdpl.xixu.dpdns.org/jsonrpc,https://3.xdpl.xixu.dpdns.org/jsonrpc,https://4.xdpl.xixu.dpdns.org/jsonrpc,https://5.xdpl.xixu.dpdns.org/jsonrpc,https://6.xdpl.xixu.dpdns.org/jsonrpc,https://7.xdpl.xixu.dpdns.org/jsonrpc,https://8.xdpl.xixu.dpdns.org/jsonrpc,https://9.xdpl.xixu.dpdns.org/jsonrpc"
-  },
-  "workers_dev": false
+  }
 }
