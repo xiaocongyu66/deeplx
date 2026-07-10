@@ -1,7 +1,6 @@
 /**
  * DeepLX
  */
-
 import { Hono } from "hono";
 import {
   clearMemoryCache,
@@ -10,7 +9,6 @@ import {
   query,
   setCachedTranslation,
 } from "./lib";
-
 import { PAYLOAD_LIMITS } from "./lib/config";
 import { createErrorResponse } from "./lib/errorHandler";
 import { normalizeLanguageCode } from "./lib/query";
@@ -40,7 +38,11 @@ async function handleScheduled(event: ScheduledEvent, env: Env): Promise<void> {
   clearMemoryCache();
 }
 
-const worker = { fetch: app.fetch, scheduled };
+const worker = {
+  fetch: app.fetch,
+  scheduled,
+};
+
 export default worker;
 
 async function logRequest(
@@ -142,14 +144,15 @@ async function handleTranslation(c: any, provider: "deepl" | "google") {
 
     const normalizedSourceLang = normalizeLanguageCode(sourceLang);
     const normalizedTargetLang = normalizeLanguageCode(targetLang);
+
     const cacheKey = generateCacheKey(
       sanitizedText,
       normalizedSourceLang,
       normalizedTargetLang,
       provider
     );
-    const cached = await getCachedTranslation(cacheKey, env);
 
+    const cached = await getCachedTranslation(cacheKey, env);
     if (cached) {
       return c.json(
         createStandardResponse(
@@ -216,6 +219,7 @@ async function handleSharkeyTranslation(c: any) {
   try {
     // 1. 获取原始请求体
     const rawBody = await c.req.text();
+
     // 可选：打印调试信息（可注释掉）
     console.log("=== RAW REQUEST BODY ===");
     console.log(rawBody);
@@ -238,8 +242,10 @@ async function handleSharkeyTranslation(c: any) {
 
     // 3. 提取参数（兼容多种字段名）
     const text = params.text || params.q || params.content || params.input;
-    const sourceLang = params.source_lang || params.source || params.from || params.sourceLang || "auto";
-    const targetLang = params.target_lang || params.target || params.to || params.targetLang || "en";
+    const sourceLang =
+      params.source_lang || params.source || params.from || params.sourceLang || "auto";
+    const targetLang =
+      params.target_lang || params.target || params.to || params.targetLang || "en";
 
     // 4. 验证文本
     if (!text || typeof text !== "string" || !text.trim()) {
@@ -275,8 +281,11 @@ async function handleSharkeyTranslation(c: any) {
     const normalizedTarget = normalizeLangCode(targetLang);
 
     // 6. 验证语言代码（跳过 "auto"）
-    const validSource = normalizedSource === "auto" ? "auto" : validateLanguageCode(normalizedSource);
-    const validTarget = normalizedTarget === "auto" ? "auto" : validateLanguageCode(normalizedTarget);
+    const validSource =
+      normalizedSource === "auto" ? "auto" : validateLanguageCode(normalizedSource);
+    const validTarget =
+      normalizedTarget === "auto" ? "auto" : validateLanguageCode(normalizedTarget);
+
     if (!validSource || !validTarget) {
       status = 400;
       errorMsg = `Invalid language codes: source=${validSource}, target=${validTarget}`;
@@ -295,8 +304,10 @@ async function handleSharkeyTranslation(c: any) {
     }
 
     // 7. 最终归一化
-    const finalSourceLang = validSource === "auto" ? "auto" : normalizeLanguageCode(validSource);
-    const finalTargetLang = validTarget === "auto" ? "auto" : normalizeLanguageCode(validTarget);
+    const finalSourceLang =
+      validSource === "auto" ? "auto" : normalizeLanguageCode(validSource);
+    const finalTargetLang =
+      validTarget === "auto" ? "auto" : normalizeLanguageCode(validTarget);
 
     requestSourceLang = finalSourceLang;
     requestTargetLang = finalTargetLang;
@@ -308,6 +319,7 @@ async function handleSharkeyTranslation(c: any) {
       finalTargetLang,
       "deepl-sharkey"
     );
+
     const cached = await getCachedTranslation(cacheKey, env);
     if (cached) {
       status = 200;
@@ -321,14 +333,15 @@ async function handleSharkeyTranslation(c: any) {
         responseTime: Date.now() - startTime,
         text: requestText,
       });
+
+      // ===== 修改点 1：缓存命中时返回 Sharkey Free Mode 格式 =====
       return c.json(
         {
-          translations: [
-            {
-              detected_source_language: cached.source_lang || finalSourceLang.toUpperCase(),
-              text: cached.data,
-            },
-          ],
+          code: 200,
+          data: cached.data,
+          source_lang: cached.source_lang || finalSourceLang.toUpperCase(),
+          target_lang: finalTargetLang.toUpperCase(),
+          alternatives: [],
         },
         200
       );
@@ -372,14 +385,15 @@ async function handleSharkeyTranslation(c: any) {
         responseTime: Date.now() - startTime,
         text: requestText,
       });
+
+      // ===== 修改点 2：实时翻译成功时返回 Sharkey Free Mode 格式 =====
       return c.json(
         {
-          translations: [
-            {
-              detected_source_language: result.source_lang || finalSourceLang.toUpperCase(),
-              text: result.data,
-            },
-          ],
+          code: 200,
+          data: result.data,
+          source_lang: result.source_lang || finalSourceLang.toUpperCase(),
+          target_lang: finalTargetLang.toUpperCase(),
+          alternatives: result.alternatives || [],
         },
         200
       );
@@ -403,10 +417,12 @@ async function handleSharkeyTranslation(c: any) {
     const elapsed = Date.now() - startTime;
     const err = error as Error;
     errorMsg = err.message || String(error);
+
     console.error("=== EXCEPTION IN HANDLER ===");
     console.error(err.stack);
     console.error("Error object:", JSON.stringify(error, Object.getOwnPropertyNames(error)));
     console.error("=== END EXCEPTION ===");
+
     status = 500;
     await logRequest(env, {
       method: "POST",
@@ -428,16 +444,13 @@ async function handleSharkeyTranslation(c: any) {
 // ============================================================
 app
   .options("*", (c) => handleCORSPreflight(c))
-
   .get("/translate", (c) => c.text("Please use POST method :)"))
   .get("/deepl", (c) => c.text("Please use POST method :)"))
   .get("/google", (c) => c.text("Please use POST method :)"))
-
   .post("/debug", async (c) => {
     if (!isDebugModeEnabled(c.env.DEBUG_MODE)) {
       return c.json(createStandardResponse(404, null), 404);
     }
-
     const env = c.env;
     const clientIP = getSecureClientIP(c.req.raw) || "unknown";
 
@@ -487,9 +500,7 @@ app
             has_target_lang: !!targetLang,
             request_id: parsedBody.id,
             timestamp: parsedBody.params?.timestamp,
-            method_format: requestBody.includes('"method" : "')
-              ? "spaced"
-              : "normal",
+            method_format: requestBody.includes('"method" : "') ? "spaced" : "normal",
             normalized_source_lang: sourceLang,
             normalized_target_lang: targetLang,
           },
@@ -506,17 +517,14 @@ app
       return c.json(createStandardResponse(400, errorMessage), 400);
     }
   })
-
   .post("/translate", async (c) => handleTranslation(c, "deepl"))
   .post("/deepl", async (c) => handleTranslation(c, "deepl"))
   .post("/google", async (c) => handleTranslation(c, "google"))
   .post("/deepl-sharkey", async (c) => handleSharkeyTranslation(c))
-
   .get("/log", (c) => {
     return c.json({
       total: recentLogs.length,
       logs: recentLogs.slice().reverse(),
     });
   })
-
   .all("*", (c) => c.redirect("https://github.com/xixu-me/DeepLX"));
