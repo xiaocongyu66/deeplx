@@ -33,6 +33,12 @@ function isDebugModeEnabled(value?: string): boolean {
 }
 
 /**
+ * 内存日志存储（最多 200 条）
+ */
+const recentLogs: any[] = [];
+const MAX_LOGS = 200;
+
+/**
  * Scheduled event handler
  */
 function scheduled(
@@ -47,9 +53,6 @@ async function handleScheduled(event: ScheduledEvent, env: Env): Promise<void> {
   clearMemoryCache();
 }
 
-/**
- * Worker export
- */
 const worker = {
   fetch: app.fetch,
   scheduled,
@@ -58,12 +61,10 @@ const worker = {
 export default worker;
 
 /**
- * ============================================================
  * 统一的日志函数
- * - 记录请求元数据（IP、语言、状态、耗时等）
- * - 翻译文本仅显示首字符，其余隐藏（隐私保护）
- * - 同时输出到控制台和可选的外部 Webhook
- * ============================================================
+ * - 文本只显示首字符 + ***，保护隐私
+ * - 其他信息（IP、语言、状态、耗时）完整记录
+ * - 存入内存（最多 200 条），同时输出到控制台
  */
 async function logRequest(
   env: Env,
@@ -76,10 +77,10 @@ async function logRequest(
     status: number;
     responseTime: number;
     error?: string;
-    text?: string; // 原始翻译文本（用于生成预览）
+    text?: string;
   }
 ) {
-  // 生成文本预览：只保留第一个字符，其余用 *** 代替
+  // 文本脱敏：只显示第一个字符
   let textPreview = null;
   if (context.text && typeof context.text === "string" && context.text.length > 0) {
     textPreview = context.text.substring(0, 1) + "***";
@@ -95,13 +96,19 @@ async function logRequest(
     status: context.status,
     response_time_ms: context.responseTime,
     error: context.error || null,
-    text_preview: textPreview, // 仅用于调试，不泄露原文
+    text_preview: textPreview,
   };
+
+  // 存入内存
+  recentLogs.push(logEntry);
+  if (recentLogs.length > MAX_LOGS) {
+    recentLogs.shift();
+  }
 
   // 输出到控制台（wrangler tail 可见）
   console.log(JSON.stringify(logEntry));
 
-  // 如果配置了外部日志 Webhook，则转发（不阻塞主流程）
+  // 可选外部 Webhook 转发
   const webhookUrl = env.LOG_WEBHOOK_URL as string | undefined;
   if (webhookUrl) {
     try {
@@ -111,7 +118,7 @@ async function logRequest(
         body: JSON.stringify(logEntry),
       });
     } catch {
-      // 忽略转发失败
+      // 忽略
     }
   }
 }
@@ -224,9 +231,6 @@ async function handleTranslation(c: any, provider: "deepl" | "google") {
 
 /**
  * Sharkey 专用翻译处理函数
- * - 支持多种语言代码变体（如 zh-CN → ZH）
- * - 返回 DeepL 官方格式
- * - 集成统一日志（记录请求参数，文本仅显示首字符）
  */
 async function handleSharkeyTranslation(c: any) {
   const startTime = Date.now();
@@ -237,10 +241,9 @@ async function handleSharkeyTranslation(c: any) {
   let targetLang = "unknown";
   let status = 500;
   let errorMsg: string | undefined;
-  let requestText = ""; // 用于日志
+  let requestText = "";
 
   try {
-    // 解析请求参数（支持 JSON 和 URL-encoded）
     let params: any = {};
     const contentType = c.req.header("Content-Type") || "";
     if (contentType.includes("application/x-www-form-urlencoded")) {
@@ -263,7 +266,6 @@ async function handleSharkeyTranslation(c: any) {
       }
     }
 
-    // 参数验证
     const text = params.text;
     if (!text || typeof text !== "string" || !text.trim()) {
       status = 400;
@@ -283,9 +285,8 @@ async function handleSharkeyTranslation(c: any) {
     }
 
     const sanitizedText = text.slice(0, PAYLOAD_LIMITS.MAX_TEXT_LENGTH);
-    requestText = sanitizedText; // 供日志使用
+    requestText = sanitizedText;
 
-    // 处理语言代码：去掉区域后缀
     const normalizeLangCode = (code: string): string => {
       if (!code || code.toLowerCase() === "auto") return code;
       const parts = code.split("-");
@@ -297,7 +298,6 @@ async function handleSharkeyTranslation(c: any) {
     const normalizedSource = normalizeLangCode(rawSource);
     const normalizedTarget = normalizeLangCode(rawTarget);
 
-    // 验证语言代码
     const validSource = validateLanguageCode(normalizedSource);
     const validTarget = validateLanguageCode(normalizedTarget);
     if (!validSource || !validTarget) {
@@ -317,14 +317,12 @@ async function handleSharkeyTranslation(c: any) {
       return c.json({ error: errorMsg }, 400);
     }
 
-    // 归一化（用于内部翻译）
     const normalizedSourceLang = normalizeLanguageCode(validSource);
     const normalizedTargetLang = normalizeLanguageCode(validTarget);
 
     sourceLang = normalizedSourceLang;
     targetLang = normalizedTargetLang;
 
-    // 缓存键
     const cacheKey = generateCacheKey(
       sanitizedText,
       normalizedSourceLang,
@@ -357,7 +355,6 @@ async function handleSharkeyTranslation(c: any) {
       );
     }
 
-    // 调用 DeepL 核心翻译
     const result = await query(
       {
         text: sanitizedText,
@@ -367,7 +364,6 @@ async function handleSharkeyTranslation(c: any) {
       { env, clientIP }
     );
 
-    // 缓存结果
     if (result.code === 200 && result.data) {
       await setCachedTranslation(
         cacheKey,
@@ -382,7 +378,6 @@ async function handleSharkeyTranslation(c: any) {
       );
     }
 
-    // 返回 DeepL 官方格式
     if (result.code === 200) {
       status = 200;
       await logRequest(env, {
@@ -545,43 +540,21 @@ app
 
   /**
    * Sharkey 专用端点
-   * - 支持语言代码变体（zh-CN → ZH）
-   * - 返回 DeepL 官方格式
-   * - 包含统一日志（文本仅显示首字符）
    */
   .post("/deepl-sharkey", async (c) => {
     return handleSharkeyTranslation(c);
   })
 
   /**
-   * 外部日志接收端点（可选）
-   * 用于接收外部系统推送的日志，同样会过滤敏感字段
+   * 日志查看端点
+   * 访问 https://deeplx.x9n2.qzz.io/log 即可看到最近的日志
+   * 返回 JSON 格式，包含请求时间、IP、语言、状态、耗时、文本预览（仅首字符）
    */
-  .post("/log", async (c) => {
-    try {
-      const body = await c.req.json();
-      // 移除可能包含的敏感字段
-      const safeBody = { ...body };
-      delete safeBody.text;
-      delete safeBody.content;
-      delete safeBody.input;
-      delete safeBody.q;
-
-      console.log("External log:", JSON.stringify(safeBody));
-
-      const webhookUrl = (c.env as any).LOG_WEBHOOK_URL as string | undefined;
-      if (webhookUrl) {
-        await fetch(webhookUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(safeBody),
-        });
-      }
-
-      return c.json({ status: "ok" }, 200);
-    } catch {
-      return c.json({ error: "Invalid log data" }, 400);
-    }
+  .get("/log", (c) => {
+    return c.json({
+      total: recentLogs.length,
+      logs: recentLogs.slice().reverse(), // 最新的在前
+    });
   })
 
   /**
