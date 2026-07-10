@@ -62,9 +62,6 @@ export default worker;
 
 /**
  * 统一的日志函数
- * - 文本只显示首字符 + ***，保护隐私
- * - 其他信息（IP、语言、状态、耗时）完整记录
- * - 存入内存（最多 200 条），同时输出到控制台
  */
 async function logRequest(
   env: Env,
@@ -80,7 +77,6 @@ async function logRequest(
     text?: string;
   }
 ) {
-  // 文本脱敏：只显示第一个字符
   let textPreview = null;
   if (context.text && typeof context.text === "string" && context.text.length > 0) {
     textPreview = context.text.substring(0, 1) + "***";
@@ -99,16 +95,13 @@ async function logRequest(
     text_preview: textPreview,
   };
 
-  // 存入内存
   recentLogs.push(logEntry);
   if (recentLogs.length > MAX_LOGS) {
     recentLogs.shift();
   }
 
-  // 输出到控制台（wrangler tail 可见）
   console.log(JSON.stringify(logEntry));
 
-  // 可选外部 Webhook 转发
   const webhookUrl = env.LOG_WEBHOOK_URL as string | undefined;
   if (webhookUrl) {
     try {
@@ -124,7 +117,7 @@ async function logRequest(
 }
 
 /**
- * 公共翻译处理函数（用于 /translate, /deepl, /google）
+ * 公共翻译处理函数
  */
 async function handleTranslation(c: any, provider: "deepl" | "google") {
   const env = c.env;
@@ -230,9 +223,23 @@ async function handleTranslation(c: any, provider: "deepl" | "google") {
 }
 
 /**
- * Sharkey 专用翻译处理函数
+ * Sharkey 专用翻译处理函数 - 带原始请求体打印
  */
 async function handleSharkeyTranslation(c: any) {
+  // ============================================================
+  // 调试：打印原始请求体（部署后运行 npx wrangler tail 查看）
+  // ============================================================
+  const rawBody = await c.req.text();
+  console.log("=== RAW REQUEST BODY ===");
+  console.log(rawBody);
+  console.log("=== RAW HEADERS ===");
+  const headers: Record<string, string> = {};
+  for (const [key, value] of c.req.raw.headers.entries()) {
+    headers[key] = value;
+  }
+  console.log(JSON.stringify(headers, null, 2));
+  console.log("=== END RAW REQUEST ===");
+
   const startTime = Date.now();
   const env = c.env;
   const clientIP = getSecureClientIP(c.req.raw) || "unknown";
@@ -244,6 +251,7 @@ async function handleSharkeyTranslation(c: any) {
   let requestText = "";
 
   try {
+    // 解析请求参数（支持 JSON 和 URL-encoded）
     let params: any = {};
     const contentType = c.req.header("Content-Type") || "";
     if (contentType.includes("application/x-www-form-urlencoded")) {
@@ -446,9 +454,6 @@ app
   .get("/deepl", (c) => c.text("Please use POST method :)"))
   .get("/google", (c) => c.text("Please use POST method :)"))
 
-  /**
-   * Debug endpoint
-   */
   .post("/debug", async (c) => {
     if (!isDebugModeEnabled(c.env.DEBUG_MODE)) {
       return c.json(createStandardResponse(404, null), 404);
@@ -523,9 +528,6 @@ app
     }
   })
 
-  /**
-   * Main translation endpoints
-   */
   .post("/translate", async (c) => {
     return handleTranslation(c, "deepl");
   })
@@ -538,26 +540,15 @@ app
     return handleTranslation(c, "google");
   })
 
-  /**
-   * Sharkey 专用端点
-   */
   .post("/deepl-sharkey", async (c) => {
     return handleSharkeyTranslation(c);
   })
 
-  /**
-   * 日志查看端点
-   * 访问 https://deeplx.x9n2.qzz.io/log 即可看到最近的日志
-   * 返回 JSON 格式，包含请求时间、IP、语言、状态、耗时、文本预览（仅首字符）
-   */
   .get("/log", (c) => {
     return c.json({
       total: recentLogs.length,
-      logs: recentLogs.slice().reverse(), // 最新的在前
+      logs: recentLogs.slice().reverse(),
     });
   })
 
-  /**
-   * Catch-all – redirect to GitHub
-   */
   .all("*", (c) => c.redirect("https://github.com/xixu-me/DeepLX"));
