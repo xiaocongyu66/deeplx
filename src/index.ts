@@ -208,6 +208,118 @@ async function handleTranslation(c: any, provider: "deepl" | "google") {
 }
 
 /**
+ * Sharkey专用翻译处理函数
+ * 兼容多种请求格式（JSON和URL-encoded），多种参数命名，并返回DeepL官方格式
+ * @param c - Hono context
+ * @returns DeepL格式的翻译响应
+ */
+async function handleSharkeyTranslation(c: any) {
+  const env = c.env;
+  const clientIP = getSecureClientIP(c.req.raw) || "unknown";
+
+  try {
+    // 解析请求参数（支持JSON和URL-encoded）
+    let params: any = {};
+    const contentType = c.req.header('Content-Type') || '';
+    if (contentType.includes('application/x-www-form-urlencoded')) {
+      const body = await c.req.parseBody();
+      params = {
+        text: body.text,
+        source_lang: body.source_lang || body.source || body.from || 'auto',
+        target_lang: body.target_lang || body.target || body.to || 'en',
+      };
+    } else {
+      // 默认 JSON
+      params = await c.req.json();
+      // 兼容多种字段名
+      if (params.text === undefined) {
+        // 可能使用 'q' 或其他字段
+        params.text = params.q || params.content || params.input;
+      }
+      if (params.source_lang === undefined) {
+        params.source_lang = params.source || params.from || params.sourceLang || 'auto';
+      }
+      if (params.target_lang === undefined) {
+        params.target_lang = params.target || params.to || params.targetLang || 'en';
+      }
+    }
+
+    // 参数验证
+    const text = params.text;
+    if (!text || typeof text !== 'string' || !text.trim()) {
+      return c.json({ error: 'Missing or invalid text parameter' }, 400);
+    }
+
+    const sanitizedText = text.slice(0, PAYLOAD_LIMITS.MAX_TEXT_LENGTH);
+    const rawSource = params.source_lang || 'auto';
+    const rawTarget = params.target_lang || 'en';
+
+    // 验证语言代码
+    const sourceLang = validateLanguageCode(rawSource);
+    const targetLang = validateLanguageCode(rawTarget);
+    if (!sourceLang || !targetLang) {
+      return c.json({ error: 'Invalid language codes' }, 400);
+    }
+
+    // 归一化
+    const normalizedSourceLang = normalizeLanguageCode(sourceLang);
+    const normalizedTargetLang = normalizeLanguageCode(targetLang);
+
+    // 缓存键
+    const cacheKey = generateCacheKey(sanitizedText, normalizedSourceLang, normalizedTargetLang, 'deepl-sharkey');
+    const cached = await getCachedTranslation(cacheKey, env);
+    if (cached) {
+      return c.json({
+        translations: [{
+          detected_source_language: cached.source_lang || normalizedSourceLang.toUpperCase(),
+          text: cached.data,
+        }]
+      }, 200);
+    }
+
+    // 调用 DeepL 核心翻译
+    const result = await query(
+      {
+        text: sanitizedText,
+        source_lang: normalizedSourceLang,
+        target_lang: normalizedTargetLang,
+      },
+      { env, clientIP }
+    );
+
+    // 缓存结果
+    if (result.code === 200 && result.data) {
+      await setCachedTranslation(
+        cacheKey,
+        {
+          data: result.data,
+          timestamp: Date.now(),
+          source_lang: result.source_lang || normalizedSourceLang.toUpperCase(),
+          target_lang: result.target_lang || normalizedTargetLang.toUpperCase(),
+          id: result.id,
+        },
+        env
+      );
+    }
+
+    // 返回 DeepL 官方格式
+    if (result.code === 200) {
+      return c.json({
+        translations: [{
+          detected_source_language: result.source_lang || normalizedSourceLang.toUpperCase(),
+          text: result.data,
+        }]
+      }, 200);
+    } else {
+      return c.json({ error: result.data || 'Translation failed' }, result.code || 500);
+    }
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    return c.json({ error: errorMessage }, 500);
+  }
+}
+
+/**
  * API Route Definitions
  * Defines all available endpoints and their handlers
  */
@@ -344,69 +456,12 @@ app
   })
 
   /**
-   * Sharkey 专用翻译端点
-   * 返回 DeepL 官方 API 兼容格式，供 Sharkey 使用
+   * Sharkey 专用翻译端点（第4个端点）
+   * 兼容 JSON 和 URL-encoded 请求，支持多种参数命名，返回 DeepL 官方格式
    * POST /deepl-sharkey
    */
   .post("/deepl-sharkey", async (c) => {
-    const env = c.env;
-    const clientIP = getSecureClientIP(c.req.raw) || "unknown";
-
-    try {
-      // 解析请求参数
-      let params;
-      try {
-        params = await c.req.json();
-      } catch {
-        return c.json({ error: "Invalid JSON" }, 400);
-      }
-
-      // 参数验证（与 handleTranslation 保持一致）
-      if (!params?.text || typeof params.text !== "string" || !params.text.trim()) {
-        return c.json({ error: "Missing or invalid text" }, 400);
-      }
-
-      const sanitizedText = params.text.slice(0, PAYLOAD_LIMITS.MAX_TEXT_LENGTH);
-      const sourceLang = params.source_lang ? validateLanguageCode(params.source_lang) : "auto";
-      const targetLang = params.target_lang ? validateLanguageCode(params.target_lang) : "en";
-
-      if (!sourceLang || !targetLang) {
-        return c.json({ error: "Invalid language codes" }, 400);
-      }
-
-      // 归一化语言代码（与 handleTranslation 一致）
-      const normalizedSourceLang = normalizeLanguageCode(sourceLang);
-      const normalizedTargetLang = normalizeLanguageCode(targetLang);
-
-      // 调用 DeepL 翻译核心（复用现有 query）
-      const result = await query(
-        {
-          text: sanitizedText,
-          source_lang: normalizedSourceLang,
-          target_lang: normalizedTargetLang,
-        },
-        { env, clientIP }
-      );
-
-      // 如果翻译成功，转换为 Sharkey 期望的 DeepL 格式
-      if (result.code === 200 && result.data) {
-        return c.json(
-          {
-            translations: [{ text: result.data }],
-          },
-          200
-        );
-      } else {
-        // 翻译失败时返回错误信息
-        return c.json(
-          { error: result.data || "Translation failed" },
-          result.code || 500
-        );
-      }
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      return c.json({ error: errorMessage }, 500);
-    }
+    return handleSharkeyTranslation(c);
   })
 
   /**
