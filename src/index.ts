@@ -200,14 +200,13 @@ async function handleTranslation(c: any, provider: "deepl" | "google") {
 }
 
 // ============================================================
-// Sharkey 专用处理函数（已修复）
+// Sharkey 专用处理函数（修复版）
 // ============================================================
 async function handleSharkeyTranslation(c: any) {
   const startTime = Date.now();
   const env = c.env;
   const clientIP = getSecureClientIP(c.req.raw) || "unknown";
 
-  // 用于日志记录
   let requestSourceLang = "unknown";
   let requestTargetLang = "unknown";
   let status = 500;
@@ -272,22 +271,22 @@ async function handleSharkeyTranslation(c: any) {
     const sanitizedText = text.slice(0, PAYLOAD_LIMITS.MAX_TEXT_LENGTH);
     requestText = sanitizedText;
 
-    // 处理语言代码：保留 "auto"，其他转为大写并去掉区域后缀
-    const normalizeLangCode = (code: string): string => {
+    // ---------- 语言代码处理 ----------
+    // 1. 规范化为 "auto" 或标准两字母代码
+    function normalizeLangCode(code: string): string {
       if (!code) return "auto";
       const lower = code.toLowerCase();
-      if (lower === "auto") return "auto"; // 保持小写
+      if (lower === "auto") return "auto";
       const parts = code.split("-");
       return parts[0].toUpperCase();
-    };
+    }
 
     const rawSource = params.source_lang || "auto";
     const rawTarget = params.target_lang || "en";
     const normalizedSource = normalizeLangCode(rawSource);
     const normalizedTarget = normalizeLangCode(rawTarget);
 
-    // 验证语言代码
-    // validateLanguageCode 可能不接受 "auto"，所以先判断
+    // 2. 验证（跳过 "auto"）
     const validSource = normalizedSource === "auto" ? "auto" : validateLanguageCode(normalizedSource);
     const validTarget = normalizedTarget === "auto" ? "auto" : validateLanguageCode(normalizedTarget);
     if (!validSource || !validTarget) {
@@ -307,19 +306,18 @@ async function handleSharkeyTranslation(c: any) {
       return c.json({ error: errorMsg }, 400);
     }
 
-    // 归一化（用于内部翻译）
-    // 注意：normalizeLanguageCode 对 "auto" 可能返回 "auto"，也可能返回 "AUTO"，需要兼容
-    const normalizedSourceLang = normalizedSource === "auto" ? "auto" : normalizeLanguageCode(validSource);
-    const normalizedTargetLang = normalizedTarget === "auto" ? "auto" : normalizeLanguageCode(validTarget);
+    // 3. 最终归一化（对于 "auto" 保持小写，其他转为大写）
+    const finalSourceLang = validSource === "auto" ? "auto" : normalizeLanguageCode(validSource);
+    const finalTargetLang = validTarget === "auto" ? "auto" : normalizeLanguageCode(validTarget);
 
-    requestSourceLang = normalizedSourceLang;
-    requestTargetLang = normalizedTargetLang;
+    requestSourceLang = finalSourceLang;
+    requestTargetLang = finalTargetLang;
 
-    // 缓存键
+    // ---------- 缓存 ----------
     const cacheKey = generateCacheKey(
       sanitizedText,
-      normalizedSourceLang,
-      normalizedTargetLang,
+      finalSourceLang,
+      finalTargetLang,
       "deepl-sharkey"
     );
     const cached = await getCachedTranslation(cacheKey, env);
@@ -329,8 +327,8 @@ async function handleSharkeyTranslation(c: any) {
         method: "POST",
         path: "/deepl-sharkey",
         ip: clientIP,
-        sourceLang: cached.source_lang || normalizedSourceLang,
-        targetLang: cached.target_lang || normalizedTargetLang,
+        sourceLang: cached.source_lang || finalSourceLang,
+        targetLang: cached.target_lang || finalTargetLang,
         status: 200,
         responseTime: Date.now() - startTime,
         text: requestText,
@@ -339,7 +337,7 @@ async function handleSharkeyTranslation(c: any) {
         {
           translations: [
             {
-              detected_source_language: cached.source_lang || normalizedSourceLang.toUpperCase(),
+              detected_source_language: cached.source_lang || finalSourceLang.toUpperCase(),
               text: cached.data,
             },
           ],
@@ -348,38 +346,40 @@ async function handleSharkeyTranslation(c: any) {
       );
     }
 
-    // 调用翻译核心
+    // ---------- 调用翻译核心 ----------
     const result = await query(
       {
         text: sanitizedText,
-        source_lang: normalizedSourceLang,
-        target_lang: normalizedTargetLang,
+        source_lang: finalSourceLang,
+        target_lang: finalTargetLang,
       },
       { env, clientIP }
     );
 
+    // 缓存结果
     if (result.code === 200 && result.data) {
       await setCachedTranslation(
         cacheKey,
         {
           data: result.data,
           timestamp: Date.now(),
-          source_lang: result.source_lang || normalizedSourceLang.toUpperCase(),
-          target_lang: result.target_lang || normalizedTargetLang.toUpperCase(),
+          source_lang: result.source_lang || finalSourceLang.toUpperCase(),
+          target_lang: result.target_lang || finalTargetLang.toUpperCase(),
           id: result.id,
         },
         env
       );
     }
 
+    // ---------- 响应 ----------
     if (result.code === 200) {
       status = 200;
       await logRequest(env, {
         method: "POST",
         path: "/deepl-sharkey",
         ip: clientIP,
-        sourceLang: result.source_lang || normalizedSourceLang,
-        targetLang: result.target_lang || normalizedTargetLang,
+        sourceLang: result.source_lang || finalSourceLang,
+        targetLang: result.target_lang || finalTargetLang,
         status: 200,
         responseTime: Date.now() - startTime,
         text: requestText,
@@ -388,7 +388,7 @@ async function handleSharkeyTranslation(c: any) {
         {
           translations: [
             {
-              detected_source_language: result.source_lang || normalizedSourceLang.toUpperCase(),
+              detected_source_language: result.source_lang || finalSourceLang.toUpperCase(),
               text: result.data,
             },
           ],
@@ -402,8 +402,8 @@ async function handleSharkeyTranslation(c: any) {
         method: "POST",
         path: "/deepl-sharkey",
         ip: clientIP,
-        sourceLang: normalizedSourceLang,
-        targetLang: normalizedTargetLang,
+        sourceLang: finalSourceLang,
+        targetLang: finalTargetLang,
         status,
         responseTime: Date.now() - startTime,
         error: errorMsg,
@@ -415,8 +415,10 @@ async function handleSharkeyTranslation(c: any) {
     const elapsed = Date.now() - startTime;
     const err = error as Error;
     errorMsg = err.message || String(error);
+    // 打印完整错误堆栈
     console.error("=== EXCEPTION IN HANDLER ===");
     console.error(err.stack);
+    console.error("Error object:", JSON.stringify(error, Object.getOwnPropertyNames(error)));
     console.error("=== END EXCEPTION ===");
     status = 500;
     await logRequest(env, {
