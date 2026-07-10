@@ -200,7 +200,7 @@ async function handleTranslation(c: any, provider: "deepl" | "google") {
 }
 
 // ============================================================
-// Sharkey 专用处理函数（修复版）
+// Sharkey 专用处理函数（使用 URLSearchParams 手动解析）
 // ============================================================
 async function handleSharkeyTranslation(c: any) {
   const startTime = Date.now();
@@ -214,8 +214,9 @@ async function handleSharkeyTranslation(c: any) {
   let requestText = "";
 
   try {
-    // 打印原始请求体（调试用）
+    // 1. 获取原始请求体
     const rawBody = await c.req.text();
+    // 可选：打印调试信息（可注释掉）
     console.log("=== RAW REQUEST BODY ===");
     console.log(rawBody);
     console.log("=== RAW HEADERS ===");
@@ -226,31 +227,21 @@ async function handleSharkeyTranslation(c: any) {
     console.log(JSON.stringify(headers, null, 2));
     console.log("=== END RAW REQUEST ===");
 
-    // 解析请求参数
-    let params: any = {};
-    const contentType = c.req.header("Content-Type") || "";
-    if (contentType.includes("application/x-www-form-urlencoded")) {
-      const body = await c.req.parseBody();
-      params = {
-        text: body.text,
-        source_lang: body.source_lang || body.source || body.from || "auto",
-        target_lang: body.target_lang || body.target || body.to || "en",
-      };
-    } else {
-      params = await c.req.json();
-      if (params.text === undefined) {
-        params.text = params.q || params.content || params.input;
-      }
-      if (params.source_lang === undefined) {
-        params.source_lang = params.source || params.from || params.sourceLang || "auto";
-      }
-      if (params.target_lang === undefined) {
-        params.target_lang = params.target || params.to || params.targetLang || "en";
+    // 2. 手动解析 URL-encoded 请求体
+    const params: Record<string, string> = {};
+    if (rawBody) {
+      const searchParams = new URLSearchParams(rawBody);
+      for (const [key, value] of searchParams.entries()) {
+        params[key] = value;
       }
     }
 
-    // 提取文本
-    const text = params.text;
+    // 3. 提取参数（兼容多种字段名）
+    const text = params.text || params.q || params.content || params.input;
+    const sourceLang = params.source_lang || params.source || params.from || params.sourceLang || "auto";
+    const targetLang = params.target_lang || params.target || params.to || params.targetLang || "en";
+
+    // 4. 验证文本
     if (!text || typeof text !== "string" || !text.trim()) {
       status = 400;
       errorMsg = "Missing or invalid text parameter";
@@ -271,8 +262,7 @@ async function handleSharkeyTranslation(c: any) {
     const sanitizedText = text.slice(0, PAYLOAD_LIMITS.MAX_TEXT_LENGTH);
     requestText = sanitizedText;
 
-    // ---------- 语言代码处理 ----------
-    // 1. 规范化为 "auto" 或标准两字母代码
+    // 5. 处理语言代码
     function normalizeLangCode(code: string): string {
       if (!code) return "auto";
       const lower = code.toLowerCase();
@@ -281,12 +271,10 @@ async function handleSharkeyTranslation(c: any) {
       return parts[0].toUpperCase();
     }
 
-    const rawSource = params.source_lang || "auto";
-    const rawTarget = params.target_lang || "en";
-    const normalizedSource = normalizeLangCode(rawSource);
-    const normalizedTarget = normalizeLangCode(rawTarget);
+    const normalizedSource = normalizeLangCode(sourceLang);
+    const normalizedTarget = normalizeLangCode(targetLang);
 
-    // 2. 验证（跳过 "auto"）
+    // 6. 验证语言代码（跳过 "auto"）
     const validSource = normalizedSource === "auto" ? "auto" : validateLanguageCode(normalizedSource);
     const validTarget = normalizedTarget === "auto" ? "auto" : validateLanguageCode(normalizedTarget);
     if (!validSource || !validTarget) {
@@ -306,14 +294,14 @@ async function handleSharkeyTranslation(c: any) {
       return c.json({ error: errorMsg }, 400);
     }
 
-    // 3. 最终归一化（对于 "auto" 保持小写，其他转为大写）
+    // 7. 最终归一化
     const finalSourceLang = validSource === "auto" ? "auto" : normalizeLanguageCode(validSource);
     const finalTargetLang = validTarget === "auto" ? "auto" : normalizeLanguageCode(validTarget);
 
     requestSourceLang = finalSourceLang;
     requestTargetLang = finalTargetLang;
 
-    // ---------- 缓存 ----------
+    // 8. 缓存检查
     const cacheKey = generateCacheKey(
       sanitizedText,
       finalSourceLang,
@@ -346,7 +334,7 @@ async function handleSharkeyTranslation(c: any) {
       );
     }
 
-    // ---------- 调用翻译核心 ----------
+    // 9. 调用翻译核心
     const result = await query(
       {
         text: sanitizedText,
@@ -356,7 +344,7 @@ async function handleSharkeyTranslation(c: any) {
       { env, clientIP }
     );
 
-    // 缓存结果
+    // 10. 缓存结果
     if (result.code === 200 && result.data) {
       await setCachedTranslation(
         cacheKey,
@@ -371,7 +359,7 @@ async function handleSharkeyTranslation(c: any) {
       );
     }
 
-    // ---------- 响应 ----------
+    // 11. 返回响应
     if (result.code === 200) {
       status = 200;
       await logRequest(env, {
@@ -415,7 +403,6 @@ async function handleSharkeyTranslation(c: any) {
     const elapsed = Date.now() - startTime;
     const err = error as Error;
     errorMsg = err.message || String(error);
-    // 打印完整错误堆栈
     console.error("=== EXCEPTION IN HANDLER ===");
     console.error(err.stack);
     console.error("Error object:", JSON.stringify(error, Object.getOwnPropertyNames(error)));
